@@ -53,13 +53,11 @@ async function update_lobby_message(lobby) {
         if(lobbyCount > 0) {
             let players = lobby.collection('players')
             players.get().then(playerDocs => {
-                let usernames = []
-                playerDocs.forEach(player => {
+                let usernames = playerDocs.docs.map((player, index) => {
                     let playerData = player.data()
-                    usernames.push(playerData['username'])
+                    return (index + 1) + ". " + playerData['username']
                 })
-                let usernameList = usernames.map((username, index) => { return (index + 1) + ". " + username })
-                lobbyMsg.edit('```css\n[DICE LOBBY]\n\n' + usernameList.join('\n') + '\n\n[Invite Code] ' + lobby.id + '\n```')
+                lobbyMsg.edit('```css\n[DICE LOBBY]\n\n' + usernames.join('\n') + '\n\n[Invite Code] ' + lobby.id + '\n```')
             })
         }
         else {
