@@ -55,8 +55,22 @@ async function lobby_change_handler(change) {
         }
 
         if(lobbyCount <= 1) {
-            await lobby.update({started: false, turn: null})
+            await lobby.update({
+                started: false,
+                turn: null,
+                lastTurn: null,
+                lastBet: null,
+                challenged: false,
+                dice: null
+            })
+            let players = lobby.collection('players')
+            let playerDocs = await players.get()
+            for (var i = 0; i < playerDocs.docs.length; i++) {
+                let playerDoc = playerDocs.docs[i]
+                await playerDoc.ref.update({dice: null})
+            }
             await set_global_message(lobby, "Waiting for other players...")
+            await update_lobby_message(lobby)
         }
         
         if(lobbyCount <= 0) {
@@ -269,7 +283,15 @@ async function dice_leave_command(msg, verbose = true) {
         let lobby_id = playerData['lobby']
         if(lobby_id != null) {
             let lobby = db.collection('lobbies').doc(lobby_id)
+            let lobbyDoc = await lobby.get()
+            let lobbyData = lobbyDoc.data()
+            let currentTurn = lobbyData['turn']
             let lobbyPlayer = lobby.collection('players').doc(msg.author.id)
+            if(currentTurn != null && currentTurn === msg.author.id) {
+                let nextTurn = await getNextTurn(lobby, currentTurn)
+                await lobby.update({turn: nextTurn})
+                await set_game_state(lobby)
+            }
             await remove_player_message(lobbyPlayer)
             await lobbyPlayer.delete()
             await lobby.update({count: FieldValue.increment(-1)})
