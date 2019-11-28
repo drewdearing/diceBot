@@ -1,6 +1,6 @@
 # diceBot
 
-A discord bot that allows users to play Liars' Dice
+A discord bot that allows users to play Liar's Dice
 
 ## Getting Started
 
