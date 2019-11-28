@@ -2,8 +2,6 @@ require('dotenv').config()
 
 const Discord = require('discord.js')
 const admin = require('firebase-admin')
-const request = require('request')
-const cheerio = require('cheerio')
 
 const client = new Discord.Client()
 var serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
@@ -44,17 +42,12 @@ function rollDice(numDice) {
     return dice
 }
 
-function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 async function lobby_change_handler(change) {
     if (change.type === 'modified') {
         let lobby = change.doc.ref
         let lobbyData = change.doc.data()
         let lobbyCount = lobbyData['count']
         let lobbyStarted = lobbyData['started']
-        console.log(lobbyData)
         await update_lobby_message(lobby)
         
         if(lobbyCount >= 2 && !lobbyStarted) {
@@ -138,9 +131,10 @@ async function start_lobby(lobby) {
     let playerDocs = await playersDB.get()
     let dice = rollDice(playerDocs.docs.length * 5)
     await lobby.update({dice, turn: playerDocs.docs[0].id})
-    playerDocs.docs.forEach(async playerDoc => {
+    for (var i = 0; i < playerDocs.docs.length; i++) {
+        let playerDoc = playerDocs.docs[i]
         await playerDoc.ref.update({dice: dice.splice(0, 5)})
-    })
+    }
     await update_lobby_message(lobby)
     await set_game_state(lobby)
 }
@@ -151,14 +145,26 @@ async function set_game_state(lobby) {
     let lobbyDice = lobbyData['dice']
     let totalDice = lobbyDice == null ? 0:lobbyDice.length
     let currentTurn = lobbyData['turn']
-    let status = ""
+    let lastTurn = lobbyData['lastTurn']
+    let lastBet = lobbyData['lastBet']
+    let challenged = lobbyData['challenged']
     let playersDB = lobby.collection('players').orderBy('joined')
     let playerDocs = await playersDB.get()
     let playerDict = {}
-    playerDocs.docs.forEach(async playerDoc => {
-        playerDict[playerDoc.id] = playerDoc.data()
+    playerDocs.docs.forEach(playerDoc => {
+        if(playerDoc.data()['dice'] != null) {
+            playerDict[playerDoc.id] = playerDoc.data()
+        }
     })
     let currentUsername = playerDict[currentTurn]["username"]
+    let lastUsername = lastTurn != null ? playerDict[lastTurn]["username"]:""
+    var status = ""
+    if(challenged) {
+        status = currentUsername + " challenged " + lastUsername
+    }
+    else if(lastTurn != null) {
+        status = lastUsername + " raised " + lastBet[0] + " [" + lastBet[1] + "]s"
+    }
     for(var id in playerDict) {
         let user = await client.fetchUser(id)
         let channel = await user.createDM()
@@ -167,6 +173,65 @@ async function set_game_state(lobby) {
         let message = await channel.fetchMessage(playerData['message'])
         await message.edit(playerDice.join(' ') + '\n```css\n' + status + "\nThere are " + totalDice + " dice total.\nIt's " + currentUsername + "'s turn.\n```")
     }
+}
+
+async function getNextTurn(lobby, currentTurn) {
+    let playersDB = lobby.collection('players').orderBy('joined')
+    let playerDocs = await playersDB.get()
+    let turnOrder = []
+    playerDocs.docs.forEach(playerDoc => {
+        if(playerDoc.data()['dice'] != null) {
+            turnOrder.push(playerDoc.id)
+        }
+    })
+    let currentIndex = turnOrder.indexOf(currentTurn)
+    let nextIndex = currentIndex + 1 == turnOrder.length ? 0:currentIndex + 1
+    return turnOrder[nextIndex]
+}
+
+async function dice_raise_command(msg, message_parts, verbose = true) {
+    let params = message_parts.slice(2, message_parts.length)
+    let player = db.collection('players').doc(msg.author.id)
+    let playerDoc = await player.get()
+    if(playerDoc.exists) {
+        let playerData = playerDoc.data()
+        let lobby_id = playerData['lobby']
+        if(lobby_id != null) {
+            let lobby = db.collection('lobbies').doc(lobby_id)
+            let lobbyDoc = await lobby.get()
+            if(lobbyDoc.exists) {
+                let lobbyData = lobbyDoc.data()
+                let currentTurn = lobbyData['turn']
+                let lastBet = lobbyData['lastBet']
+                let lobbyDice = lobbyData['dice']
+                if(msg.author.id === currentTurn) {
+                    if(params.length == 2) {
+                        let count = parseInt(params[0].replace(/\D/g,''), 10)
+                        let face = parseInt(params[1].replace(/\D/g,''), 10)
+                        let bothNumbers = !isNaN(face) && !isNaN(count)
+                        let validDieFace = face >= 1 && face <= 6
+                        let validCount = count > 0 && count <= lobbyDice.length
+                        let validRaise = lastBet == null || count > lastBet[0] || face > lastBet[1]
+                        if(bothNumbers && validDieFace && validCount && validRaise) {
+                            let nextTurn = await getNextTurn(lobby, currentTurn)
+                            await lobby.update({
+                                lastTurn: msg.author.id,
+                                lastBet: [count, face],
+                                challenged: false,
+                                turn: nextTurn
+                            })
+                            await set_game_state(lobby)
+                        }
+                        else if(verbose) await msg.reply('invalid raise')
+                    }
+                    else if(verbose) await msg.reply('this command requires two parameters')
+                }
+                else if(verbose) await msg.reply('it is not your turn')
+                return
+            }
+        }
+    }
+    if(verbose) await msg.reply('you are not in a lobby')
 }
 
 async function dice_start_command(msg, verbose = true) {
@@ -281,6 +346,9 @@ async function dice_create_command(msg, message_parts) {
         message: lobbyMsg.id,
         started: false,
         turn: null,
+        lastTurn: null,
+        lastBet: null,
+        challenged: false,
         dice: null
     })
     await channel.set({lobby: lobby.id})
@@ -302,6 +370,12 @@ function dice_command(msg, message_parts) {
         else if(message_parts[1] === 'start'){
             dice_start_command(msg)
         }
+        else if(message_parts[1] === 'raise'){
+            dice_raise_command(msg, message_parts)
+        }
+        else if(message_parts[1] === 'challenge'){
+            dice_challenge_command(msg)
+        }
     }
 }
 
@@ -315,7 +389,7 @@ client.on('message', msg => {
 db.collection('lobbies').onSnapshot(querySnapshot => {
     querySnapshot.docChanges().forEach(change => {
         lobby_change_handler(change)
-    });
-});
+    })
+})
 
 client.login(process.env.BOT_TOKEN)
