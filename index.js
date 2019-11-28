@@ -42,6 +42,10 @@ function rollDice(numDice) {
     return dice
 }
 
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 async function lobby_change_handler(change) {
     if (change.type === 'modified') {
         let lobby = change.doc.ref
@@ -55,20 +59,7 @@ async function lobby_change_handler(change) {
         }
 
         if(lobbyCount <= 1) {
-            await lobby.update({
-                started: false,
-                turn: null,
-                lastTurn: null,
-                lastBet: null,
-                challenged: false,
-                dice: null
-            })
-            let players = lobby.collection('players')
-            let playerDocs = await players.get()
-            for (var i = 0; i < playerDocs.docs.length; i++) {
-                let playerDoc = playerDocs.docs[i]
-                await playerDoc.ref.update({dice: null})
-            }
+            await reset_lobby(lobby)
             await set_global_message(lobby, "Waiting for other players...")
             await update_lobby_message(lobby)
         }
@@ -76,6 +67,23 @@ async function lobby_change_handler(change) {
         if(lobbyCount <= 0) {
             lobby.delete()
         }
+    }
+}
+
+async function reset_lobby(lobby) {
+    await lobby.update({
+        started: false,
+        turn: null,
+        lastTurn: null,
+        lastBet: null,
+        challenged: false,
+        dice: null
+    })
+    let players = lobby.collection('players')
+    let playerDocs = await players.get()
+    for (var i = 0; i < playerDocs.docs.length; i++) {
+        let playerDoc = playerDocs.docs[i]
+        await playerDoc.ref.update({dice: null})
     }
 }
 
@@ -104,7 +112,8 @@ async function update_lobby_message(lobby) {
                 let usernames = playerDocs.docs.map((player, index) => {
                     let playerData = player.data()
                     let status = playerData['dice'] == null ? "Waiting":"Playing"
-                    return (index + 1) + ". " + playerData['username'] + " - " + status
+                    let points = playerData['score']
+                    return (index + 1) + ". " + playerData['username'] + " | " + status + " | " + points + " points"
                 })
                 lobbyMsg.edit('```css\n[DICE LOBBY]\n\n' + usernames.join('\n') + '\n\n[Invite Code] ' + lobby.id + '\n```')
             })
@@ -156,6 +165,7 @@ async function start_lobby(lobby) {
 async function set_game_state(lobby) {
     let lobbyDoc = await lobby.get()
     let lobbyData = lobbyDoc.data()
+    let lobbyChannel = await get_lobby_channel(lobbyData)
     let lobbyDice = lobbyData['dice']
     let totalDice = lobbyDice == null ? 0:lobbyDice.length
     let currentTurn = lobbyData['turn']
@@ -174,10 +184,21 @@ async function set_game_state(lobby) {
     let lastUsername = lastTurn != null ? playerDict[lastTurn]["username"]:""
     var status = ""
     if(challenged) {
-        status = currentUsername + " challenged " + lastUsername
+        let totalFace = lobbyDice.filter(face => face === lastBet[1]).length
+        status = currentUsername + " challenged " + lastUsername + "'s " + lastBet[0] + " [" + lastBet[1] + "]s"
+        status = status + "\nThere were " + totalFace + " [" + lastBet[1] + "]s total."
+        if(totalFace < lastBet[0]) {
+            status = status + "\n" + currentUsername + " wins!"
+        }
+        else {
+            status = status + "\n" + lastUsername + " wins!"
+        }
     }
-    else if(lastTurn != null) {
-        status = lastUsername + " raised " + lastBet[0] + " [" + lastBet[1] + "]s"
+    else{
+        if(lastTurn != null) {
+            status = lastUsername + " raised " + lastBet[0] + " [" + lastBet[1] + "]s"
+        }
+        status = status + "\nThere are " + totalDice + " dice total.\nIt's " + currentUsername + "'s turn."
     }
     for(var id in playerDict) {
         let user = await client.fetchUser(id)
@@ -185,8 +206,9 @@ async function set_game_state(lobby) {
         let playerData = playerDict[id]
         let playerDice = playerData['dice'].map(die => ":" + diceNames[die] + ":")
         let message = await channel.fetchMessage(playerData['message'])
-        await message.edit(playerDice.join(' ') + '\n```css\n' + status + "\nThere are " + totalDice + " dice total.\nIt's " + currentUsername + "'s turn.\n```")
+        await message.edit(playerDice.join(' ') + "\n```css\n" + status + "\n```")
     }
+    await lobbyChannel.send("```css\n" + status + "\n```")
 }
 
 async function getNextTurn(lobby, currentTurn) {
@@ -201,6 +223,42 @@ async function getNextTurn(lobby, currentTurn) {
     let currentIndex = turnOrder.indexOf(currentTurn)
     let nextIndex = currentIndex + 1 == turnOrder.length ? 0:currentIndex + 1
     return turnOrder[nextIndex]
+}
+
+async function dice_challenge_command(msg, verbose = true) {
+    let player = db.collection('players').doc(msg.author.id)
+    let playerDoc = await player.get()
+    if(playerDoc.exists) {
+        let playerData = playerDoc.data()
+        let lobby_id = playerData['lobby']
+        if(lobby_id != null) {
+            let lobby = db.collection('lobbies').doc(lobby_id)
+            let lobbyDoc = await lobby.get()
+            if(lobbyDoc.exists) {
+                let lobbyData = lobbyDoc.data()
+                let currentTurn = lobbyData['turn']
+                let lastBet = lobbyData['lastBet']
+                let lastTurn = lobbyData['lastTurn']
+                let lobbyDice = lobbyData['dice']
+                if(msg.author.id === currentTurn) {
+                    let totalFace = lobbyDice.filter(face => face === lastBet[1]).length
+                    if(totalFace < lastBet[0]) {
+                        await lobby.collection('players').doc(currentTurn).update({score: FieldValue.increment(1)})
+                    }
+                    else {
+                        await lobby.collection('players').doc(lastTurn).update({score: FieldValue.increment(1)})
+                    }
+                    await lobby.update({challenged: true})
+                    await set_game_state(lobby)
+                    await delay(5000)
+                    await reset_lobby(lobby)
+                }
+                else if(verbose) await msg.reply('it is not your turn')
+                return
+            }
+        }
+    }
+    if(verbose) await msg.reply('you are not in a lobby')
 }
 
 async function dice_raise_command(msg, message_parts, verbose = true) {
